@@ -293,7 +293,7 @@ pub fn handle_choice_buttons(
 
         // クリック完了時のみ選択処理
         if released {
-            info!("選択肢クリック完了: index={}", btn.index);
+            debug!("選択肢クリック完了: index={}", btn.index);
             state.waiting_choice = false;
             choice_queue
                 .0

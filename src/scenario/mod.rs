@@ -168,7 +168,7 @@ pub fn apply_pending_waiting_choice(
     mut state: ResMut<ScenarioState>,
 ) {
     if pending.0 {
-        info!("選択肢待ち状態に移行");
+        debug!("選択肢待ち状態に移行");
         state.waiting_choice = true;
         pending.0 = false;
     }
@@ -230,7 +230,7 @@ pub fn advance_on_input(
         if let Some(index) = key_index {
             let count = state.choice_count();
             if index < count {
-                info!("選択肢をキーで選択: index={}", index);
+                debug!("選択肢をキーで選択: index={}", index);
                 state.waiting_choice = false;
                 choice_queue.0.push(ChoiceSelectedEvent { index });
             }
@@ -265,7 +265,7 @@ pub fn handle_choice_selected(
 ) {
     let items: Vec<_> = queue.0.drain(..).collect();
     for ev in items {
-        info!("選択肢確定処理: index={}", ev.index);
+        debug!("選択肢確定処理: index={}", ev.index);
         state.select_choice(ev.index);
         commands.trigger(ScenarioTextChanged);
     }
