@@ -8,7 +8,7 @@ Bevy を使ったビジュアルノベル / ADV プロトタイプ。
 
 | 項目         | 内容                    |
 | ------------ | ----------------------- |
-| Bevy         | 0.18（git main）        |
+| Bevy         | 0.19（git main）        |
 | Rust edition | 2024                    |
 | ターゲット   | Windows / macOS / Linux |
 
@@ -17,9 +17,11 @@ Bevy を使ったビジュアルノベル / ADV プロトタイプ。
 ## 設計方針
 
 - **設定値は基本パーセント表記**（`Val::Percent`）で解像度非依存にする
-- **`mod.rs` で各パーツを統括する**。プラグイン登録・システム登録はすべて `mod.rs` に集約し、個別ファイルに散らさない
+- **`mod.rs` で各パーツを統括する**。プラグイン登録・システム登録はすべて `mod.rs` に集約する
 - **各パーツごとに役割を分担する**。UI・シナリオ・入力など関心事を明確に分離する
 - **シナリオデータはバイナリ外部管理**。RON ファイルとして `assets/scenarios/` に置き、再ビルドなしで差し替え可能にする
+- **仮置きリソースはカラーブロックで代替**。立ち絵・背景は後から画像に差し替えるだけで OK な構造にする
+- **Bevy の不安定 API には依存しない**。git main を使う都合上、リリース間で廃止・移動された API は使わず、安定した基本機能だけで設計する（詳細は後述）
 
 ---
 
@@ -31,24 +33,75 @@ mygame_sample1
 │   ├── fonts
 │   │   └── NotoSansJP-Regular.ttf
 │   └── scenarios
-│       ├── chapter_01
-│       │   ├── scene_01.ron        # 会話シーン（実装済み）
-│       │   └── scene_02.ron        # （未作成）
-│       └── chapter_02
-│           └── scene_01.ron        # （未作成）
+│       └── chapter_01
+│           └── scene_01.ron
 ├── src
 │   ├── scenario
-│   │   ├── mod.rs                  # ScenarioPlugin / ScenarioState / ScenarioTextChanged
-│   │   ├── loader.rs               # RON ファイルの読み込み
-│   │   └── types.rs                # Scene / Step / SceneCommand 型定義
+│   │   ├── mod.rs          # ScenarioPlugin / ScenarioState / キュー Resource 定義
+│   │   ├── loader.rs       # RON ファイルの読み込み
+│   │   └── types.rs        # Scene / Step / SceneCommand 型定義
 │   ├── ui
-│   │   ├── mod.rs                  # UiModulePlugin / カメラ・各パーツの spawn
-│   │   ├── messenger.rs            # メッセージウィンドウ（話者名 + 本文）
-│   │   └── background.rs           # 背景レイヤー
-│   └── main.rs                     # App 組み立て・プラグイン登録
+│   │   ├── mod.rs          # UiModulePlugin / 全システム登録
+│   │   ├── messenger.rs    # メッセージウィンドウ・タイプライター・選択肢 UI
+│   │   ├── background.rs   # 背景レイヤー・ChangeBackground 処理
+│   │   └── character.rs    # 立ち絵スロット（Left / Center / Right）
+│   └── main.rs             # App 組み立て・プラグイン登録
 ├── Cargo.toml
 └── README.md
 ```
+
+---
+
+## 実装済み機能
+
+### タイプライター演出
+
+- `TypewriterState` リソースで文字送り状態を管理
+- 1文字あたり `0.04秒`（`TYPEWRITER_CHAR_INTERVAL` 定数で調整可能）
+- **スキップ対応**：演出中にスペース / 左クリックで全文を即時表示
+- 次のステップへの進行は演出完了後のみ受け付ける
+
+### 選択肢システム
+
+`Step::Choice` バリアント追加。
+
+```ron
+Choice(
+    prompt: "何と答える？",
+    options: [
+        ChoiceOption( label: "「はい」", jump_to: None ),
+        ChoiceOption( label: "「いいえ」", jump_to: None ),
+    ],
+),
+```
+
+- 選択肢が表示されている間は Space / クリックによる強制進行をブロック
+- ホバー時・クリック時の色変化でフィードバック
+- `jump_to` フィールドは将来のシーン分岐用（現在は次の step へ進む）
+
+### 立ち絵表示（カラーブロック仮置き）
+
+- Left / Center / Right の3スロット固定
+- キャラクター ID ごとに異なる色のブロックを表示（差し替え構造）
+- `ShowCharacter` / `HideCharacter` コマンドで制御
+
+```ron
+Command(ShowCharacter( id: "heroine_a", position: Left, expression: "normal" )),
+Command(HideCharacter( position: Left )),
+```
+
+**将来の差し替え方法：** `character.rs` の `spawn_character_slots` 内プレースホルダーを `ImageNode` に置き換えるだけ。
+
+### 背景切り替え（カラーブロック仮置き）
+
+- `ChangeBackground(key)` コマンドで背景色を変更
+- キーと色のマッピングは `background.rs` の `bg_color_for_key` 関数で管理
+
+```ron
+Command(ChangeBackground("classroom")),
+```
+
+**将来の差し替え方法：** `background.rs` の `handle_background_change` 内で `BackgroundColor` を `ImageNode` への切り替えに変えるだけ。
 
 ---
 
@@ -56,89 +109,78 @@ mygame_sample1
 
 ### `src/scenario`
 
-シナリオデータの読み込みと進行状態を管理する。UI とは `ScenarioTextChanged`（Observer イベント）経由で疎結合に連携する。
-
 #### `types.rs` — データ型
 
 ```
 Scene
 └── steps: Vec<Step>
-      ├── Dialogue { speaker, text, voice? }   # セリフ（話者名付き）
-      ├── Narration { text }                    # ナレーション（話者なし）
-      └── Command(SceneCommand)                 # 演出コマンド（将来実装）
+      ├── Dialogue { speaker, text, voice? }
+      ├── Narration { text }
+      ├── Choice { prompt?, options: Vec<ChoiceOption> }
+      └── Command(SceneCommand)
             ├── ChangeBackground(String)
+            ├── ShowCharacter { id, position, expression }
+            ├── HideCharacter { position }
             ├── PlayBgm(String)
             ├── StopBgm
             └── WaitInput
 ```
 
-- `voice` フィールドは将来の音声対応用。現時点では未使用（`#[allow(dead_code)]`）
-- `SceneCommand` は現時点では未使用（`#[allow(dead_code)]`）
+#### `mod.rs` — モジュール間通信の仕組み
 
-#### `loader.rs` — ファイル読み込み
+モジュール間の通知は 2 種類の仕組みを使い分けている。
 
-- `load_scene(path: &Path) -> Result<Scene>` を提供
-- `ron::from_str` でデシリアライズ。失敗時は `anyhow::Error` を返す
+**① Observer イベント（`commands.trigger`）**
 
-#### `mod.rs` — プラグイン・状態管理
+`ScenarioTextChanged` のみ。テキスト・状態変化を Observer で受け取り、UI 側が即座に反応する用途に使う。Observer 内では `ResMut` しか安全に扱えないため、イベント発行は行わない。
 
-| 要素                  | 説明                                                        |
-| --------------------- | ----------------------------------------------------------- |
-| `ScenarioState`       | `Resource`。現在のシーンと step インデックスを保持          |
-| `ScenarioTextChanged` | `Event`。テキストが変化したことを Observer 経由で UI へ通知 |
-| `ScenarioPlugin`      | 起動時に RON をロードし、入力処理システムを登録             |
+**② 自作 Vec キュー（`Resource<Vec<T>>`）**
 
-**入力トリガー**：`Space` キー または マウス左クリックで次の step へ進み、`commands.trigger(ScenarioTextChanged)` を発火する。
+シーンコマンド（背景・立ち絵）と選択肢確定の通知に使う。Observer が `PendingSceneCommand` Resource に書き込み、次フレームの通常システム `flush_pending_command` がキューに積む。UI 側のシステムが `drain()` で消費する。
 
----
+```
+ScenarioTextChanged (trigger)
+  └─► on_scenario_text_changed (Observer / UI)
+  └─► dispatch_commands (Observer / Scenario)
+        └─► PendingSceneCommand (Resource)
+              └─► flush_pending_command (System)
+                    └─► BackgroundChangeQueue / CharacterShowQueue / CharacterHideQueue
+                          └─► handle_background_change / handle_character_show / handle_character_hide
+
+ChoiceButton (UI Interaction)
+  └─► handle_choice_buttons (System)
+        └─► ChoiceSelectedQueue (Resource)
+              └─► handle_choice_selected (System)
+                    └─► commands.trigger(ScenarioTextChanged)
+```
+
+| キュー Resource         | 書き込み元              | 読み取り元                 |
+| ----------------------- | ----------------------- | -------------------------- |
+| `BackgroundChangeQueue` | `flush_pending_command` | `handle_background_change` |
+| `CharacterShowQueue`    | `flush_pending_command` | `handle_character_show`    |
+| `CharacterHideQueue`    | `flush_pending_command` | `handle_character_hide`    |
+| `ChoiceSelectedQueue`   | `handle_choice_buttons` | `handle_choice_selected`   |
 
 ### `src/ui`
 
-画面描画を担当する。シナリオの詳細を知らず、`ScenarioState` と Observer イベントのみを参照する。
+#### `messenger.rs`
+
+| 要素                       | 説明                                         |
+| -------------------------- | -------------------------------------------- |
+| `TypewriterState`          | Resource。文字送り状態・スキップ処理を管理   |
+| `update_typewriter`        | フレームごとに文字を1文字ずつ追加            |
+| `on_scenario_text_changed` | Observer。タイプライター開始・選択肢 UI 更新 |
+| `handle_choice_buttons`    | 選択肢ボタンのホバー・クリック処理           |
 
 #### `background.rs`
 
 - `BackgroundLayer` コンポーネントを持つ全画面ノード（`ZIndex(-1)`）
-- 背景色：`Color::srgba(0.02, 0.02, 0.1, 1.0)`
+- `handle_background_change` で `BackgroundChangeQueue` を drain して背景色を更新
 
-#### `messenger.rs`
+#### `character.rs`
 
-メッセージウィンドウ全体を管理するモジュール。
-
-**レイアウト**
-
-| 項目       | 値                                              |
-| ---------- | ----------------------------------------------- |
-| 位置       | 画面下部・中央寄せ（`left: 5%`, `bottom: 3%`）  |
-| サイズ     | 幅 `90%`、高さ `22%`                            |
-| パディング | 水平 `2.5%`、垂直 `2.0%`                        |
-| 背景       | `srgba(0.05, 0.05, 0.15, 0.92)`（半透明ダーク） |
-| 枠線       | `srgba(0.6, 0.6, 1.0, 0.8)`（淡い青紫）         |
-
-**テキスト要素**
-
-| コンポーネント | フォントサイズ | 色                          | 説明                         |
-| -------------- | -------------- | --------------------------- | ---------------------------- |
-| `SpeakerText`  | `18px`         | `srgba(0.8, 0.9, 1.0, 1.0)` | 話者名。Narration 時は空文字 |
-| `MessageText`  | `24px`         | `WHITE`                     | 本文                         |
-
-**未実装・今後の対応予定**
-
-- [ ] テキストの左寄せ / 中寄せ切り替え
-- [ ] 最大3行表示（オーバーフロー制御）
-- [ ] 1文字ずつ表示するタイプライター演出
-- [ ] オート送り（一定時間で自動進行）
-- [ ] スキップ（長押しまたはキー入力で高速送り）
-
----
-
-### `src/main.rs`
-
-プラグインの登録順：
-
-1. `DefaultPlugins`（ウィンドウタイトル設定含む）
-2. `ScenarioPlugin`（Resource を先に確保する必要があるため UI より前）
-3. `UiModulePlugin`
+- `CharacterSlot { position }` コンポーネントで3スロットを管理
+- `handle_character_show` / `handle_character_hide` でキューを drain して表示切り替え
 
 ---
 
@@ -148,46 +190,177 @@ Scene
 Scene(
     id: "chapter_id_scene_id",
     steps: [
-        Command(ChangeBackground("背景キー")),
-        Command(PlayBgm("BGMキー")),
-        Narration(
-            text: "ナレーションテキスト。",
+        Command(ChangeBackground("classroom")),
+        Command(ShowCharacter( id: "heroine_a", position: Left, expression: "normal" )),
+        Narration( text: "ナレーションテキスト。" ),
+        Dialogue( speaker: "キャラ名", text: "セリフ。" ),
+        Choice(
+            prompt: Some("どうする？"),
+            options: [
+                ChoiceOption( label: "選択肢A", jump_to: None ),
+                ChoiceOption( label: "選択肢B", jump_to: None ),
+            ],
         ),
-        Dialogue(
-            speaker: "キャラクター名",
-            text: "セリフテキスト。",
-        ),
-        Command(WaitInput),
+        Command(HideCharacter( position: Left )),
     ],
 )
 ```
 
 ---
 
-## 依存クレート
+## Bevy 0.19 git main との互換性メモ
 
-| クレート | 用途                                 |
-| -------- | ------------------------------------ |
-| `bevy`   | ゲームエンジン本体（git main）       |
-| `serde`  | シリアライズ / デシリアライズ derive |
-| `ron`    | RON フォーマットのパーサー           |
-| `anyhow` | エラーハンドリング                   |
+Bevy は git main を使用しているため、安定版と異なる API 破壊が起きることがある。
+このプロジェクトで実際に踏んだ問題と対処を記録する。
+
+### ① `EventReader` / `EventWriter` / `add_event` の廃止
+
+**問題**
+
+`bevy::prelude::*` にも `bevy::ecs::event` にも `EventReader` / `EventWriter` が存在せず、
+`App::add_event::<T>()` メソッドも存在しない。
+
+```
+error[E0432]: unresolved import `bevy::ecs::event::EventReader`
+error[E0599]: no method named `add_event` found for mutable reference `&mut App`
+```
+
+**原因**
+
+Bevy 0.19 git main でこれらの型・メソッドが廃止または移動された。
+
+**対処**
+
+Bevy 組み込みのイベントシステムを使わず、**`Resource` に `Vec<T>` を持つ自作キュー**方式に統一した。
+
+```rust
+// 定義
+#[derive(Resource, Default)]
+pub struct BackgroundChangeQueue(pub Vec<BackgroundChangeRequested>);
+
+// 書き込み
+bg_queue.0.push(BackgroundChangeRequested { key });
+
+// 読み出し（消費）
+for ev in queue.0.drain(..) { ... }
+```
+
+この方式は Bevy のバージョン変化に関係なく動作する。
+
+### ② Observer 内で `EventWriter` / `ResMut<Events<T>>` が使えない
+
+**問題**
+
+Observer のシステムパラメータに `EventWriter<T>` や `ResMut<Events<T>>` を渡すとコンパイルエラーになる。
+
+**原因**
+
+Bevy の Observer は通常のシステムと異なる実行コンテキストを持つため、書き込み系の Event 操作が制限される。
+
+**対処**
+
+Observer は `ResMut<PendingSceneCommand>`（単純な Resource）への書き込みのみ行い、
+実際のキュー書き込みは次フレームで実行される通常システム `flush_pending_command` に委譲する2段階方式を採用した。
+
+```
+Observer → PendingSceneCommand (Resource) → flush_pending_command (System) → Vec キュー
+```
+
+### ③ `TextFont::font` の型が `Handle<Font>` から `FontSource` に変更
+
+**問題**
+
+```
+error[E0308]: mismatched types
+  expected enum `FontSource`, found enum `Handle<_>`
+```
+
+**対処**
+
+```rust
+// 変更前
+TextFont { font: font_handle.clone(), .. }
+
+// 変更後
+TextFont { font: FontSource::Handle(font_handle.clone()), .. }
+```
+
+### ④ `BorderRadius` がコンポーネントから `Node` のフィールドに移動
+
+**問題**
+
+```
+error[E0277]: `(Name, ..., BorderRadius)` is not a `Bundle`
+```
+
+**対処**
+
+```rust
+// 変更前（コンポーネントとして追加）
+.spawn(( ..., BorderRadius::all(Val::Px(6.0)) ))
+
+// 変更後（Node のフィールドとして設定）
+Node {
+    border_radius: BorderRadius::all(Val::Px(6.0)),
+    ..default()
+}
+```
+
+### ⑤ RON 0.8 では `Option` フィールドに `Some(...)` が必須
+
+**問題**
+
+`Option<String>` フィールドに文字列をそのまま書くとパースエラーになる。
+
+```
+40:21: Expected option
+```
+
+**原因**
+
+RON 0.8 は `Option<T>` の値を `Some(...)` / `None` と明示する必要がある。
+JSON や TOML のように値をそのまま書くことはできない。
+
+**対処**
+
+```ron
+// NG
+prompt: "何と答える？",
+
+// OK
+prompt: Some("何と答える？"),
+prompt: None,
+```
+
+`#[serde(default)]` を付けたフィールドはRONファイルに書かなければ `None` になるため、
+省略したい場合はフィールドごと書かないのが最もシンプル。
+
+### ⑥ `Children::iter()` の戻り値が `&Entity` から `Entity` に変更
+
+**問題**
+
+```
+error[E0308]: expected `Entity`, found `&_`
+```
+
+**対処**
+
+```rust
+// 変更前
+for &child in children.iter() { ... }
+
+// 変更後
+for child in children.iter() { ... }
+```
 
 ---
 
 ## 今後の予定
 
-- セーブ＆ロード
-  - 現在の `ScenarioState`（シーン ID・step インデックス）をファイルに永続化し、再開できるようにする
-
-- システムボタン
-  - 画面上部などに Save / Load / Prof（プロフィール）/ Conf（設定）ボタンを配置する
-
-- シナリオ選択肢
-  - `Step` に `Choice { options: Vec<ChoiceOption> }` バリアントを追加し、分岐シナリオを実現する
-
-- 立ち絵表示・操作
-  - キャラクター画像を画面中央付近に表示し、位置・表情・フリップなどを `SceneCommand` で制御する
-
-- 背景切り替え
-  - `Command(ChangeBackground(...))` を実際に処理し、`background.rs` の背景画像を差し替える
+- セーブ＆ロード — `ScenarioState`（シーン ID・step インデックス）をファイルに永続化
+- システムボタン — Save / Load / Conf ボタンを画面上部に配置
+- 立ち絵の画像差し替え — `character.rs` のプレースホルダーを `ImageNode` に変更
+- 背景画像の差し替え — `background.rs` の `BackgroundColor` を `ImageNode` に変更
+- `jump_to` によるシーン分岐 — 選択肢でシーンファイルをロードし直す
+- タイプライター音声 — 文字送りと同期した SE 再生
+- オート送り / スキップ — 一定時間で自動進行・長押し高速送り

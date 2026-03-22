@@ -9,7 +9,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Bevy 0.18 Modular Design".into(),
+                title: "Bevy Visual Novel".into(),
                 ..default()
             }),
             ..default()
