@@ -1,2 +1,4 @@
 assets/
 target/
+.claude/
+saves/
