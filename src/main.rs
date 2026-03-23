@@ -1,7 +1,9 @@
+mod save;
 mod scenario;
 mod ui;
 
 use bevy::prelude::*;
+use save::SavePlugin;
 use scenario::ScenarioPlugin;
 use ui::UiModulePlugin;
 
@@ -18,6 +20,8 @@ fn main() {
         .add_plugins(ScenarioPlugin {
             initial_scene_path: "assets/scenarios/chapter_01/scene_01.ron".into(),
         })
+        // セーブ・ロードプラグイン
+        .add_plugins(SavePlugin)
         .add_plugins(UiModulePlugin)
         .run();
 }

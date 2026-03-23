@@ -190,6 +190,7 @@ pub fn advance_on_input(
     mut commands: Commands,
     mut choice_queue: ResMut<ChoiceSelectedQueue>,
     typewriter: Option<Res<crate::ui::messenger::TypewriterState>>,
+    button_q: Query<&Interaction, With<Button>>,
 ) {
     // ── 選択肢待ち中 ──────────────────────────────
     if state.waiting_choice {
@@ -240,7 +241,10 @@ pub fn advance_on_input(
     }
 
     // ── 通常進行 ──────────────────────────────────
-    let triggered = keyboard.just_pressed(KeyCode::Space) || mouse.just_pressed(MouseButton::Left);
+    // UI ボタンが押されている場合はクリックによる進行をブロック
+    let ui_pressed = button_q.iter().any(|i| *i == Interaction::Pressed);
+    let triggered = keyboard.just_pressed(KeyCode::Space)
+        || (mouse.just_pressed(MouseButton::Left) && !ui_pressed);
     if !triggered {
         return;
     }
